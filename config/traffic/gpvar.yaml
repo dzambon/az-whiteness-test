@@ -1,0 +1,7 @@
+window: 12
+horizon: 1
+batch_size: 16
+l2_reg: 0.
+use_lr_schedule: True
+lr: 0.005
+epochs: 200
