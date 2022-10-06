@@ -44,14 +44,6 @@ def sum_duplicates(edge_index, edge_weight=None, inplace=False):
 def twosided_std_gaussian_pval(stat):
     return 2 * (1 - scipy.stats.norm.cdf(np.abs(stat)))
 
-def adj_to_edge_list(A):
-    assert A.ndim == 2
-    edge_index_spatial = np.array(np.where(A))
-    edge_weight_spatial = None
-    if np.any(np.logical_and(A != 0, A != 1)):
-        edge_weight_spatial = A[edge_index_spatial[0], edge_index_spatial[1]]
-    return edge_index_spatial, edge_weight_spatial
-
 def masked_median(x, mask):
     """
     Median of numpy array x with masked values.
@@ -271,7 +263,8 @@ def optimality_check(x, mask=None,
 
     # Parse graph
     if A is not None:
-        edge_index_spatial, edge_weight_spatial = adj_to_edge_list(A)
+        raise NotImplementedError()
+        # edge_index_spatial, edge_weight_spatial = adj_to_edge_list(A)
 
     # Parse mask
     if mask is None:
@@ -304,76 +297,39 @@ def optimality_check(x, mask=None,
     #     print(m)
     return msg
 
-AVAILABLE_DISTRIBUTIONS = ["norm", "chi2(1)", "chi2(5)", "bi-norm", "chi2(1)-chi2(5)", "bi-unif14"]
-def gen_nullmedian_signal(shape: tuple, distrib: str="norm"):
-    """
-    Generates iid graph signals from different distributions
-
-    :param shape: (3-tuple) generally in the format (T, N, F)
-    :param distrib: (str) identifier of the type of distribution
-    :return:
-    """
-    if distrib == "norm":
-        x = np.random.randn(*shape)
-    elif distrib == "chi2(1)":
-        import scipy.stats
-        x = scipy.stats.chi2(df=1).rvs(size=shape)
-        x -= scipy.stats.chi2(df=1).ppf(0.5)
-    elif distrib == "chi2(5)":
-        import scipy.stats
-        x = scipy.stats.chi2(df=5).rvs(size=shape)
-        x -= scipy.stats.chi2(df=5).ppf(0.5)
-    # elif distrib == "mix":
-    #     import scipy.stats
-    #     mask = np.random.rand(*shape) > .7
-    #     x = mask * scipy.stats.chi2(df=1).rvs(size=shape)
-    #     x += (1 - mask) * scipy.stats.chi2(df=5).rvs(size=shape)
-    elif distrib == "bi-norm":
-        import scipy.stats
-        mask = np.random.rand(*shape) > .5
-        x = mask * np.random.randn(*shape)+3.
-        x += (1 - mask) * np.random.randn(*shape)-3.
-    elif distrib == "chi2(1)-chi2(5)":
-        import scipy.stats
-        mask = np.random.rand(*shape) > .5
-        x = mask * scipy.stats.chi2(df=1).rvs(size=shape)
-        x += (1 - mask) * scipy.stats.chi2(df=5).rvs(size=shape) * (-1.)
-    elif distrib == "bi-unif14":
-        import scipy.stats
-        mask = np.random.rand(*shape) > .5
-        x = mask * np.random.rand(*shape)
-        x += (1 - mask) * np.random.rand(*shape) * (-4.)
-    else:
-        raise NotImplementedError(f"Distribution {distrib} is not available")
-
-    return x
-
-def gen_correlated_signal(x, G, c_space, c_time):
-    from einops import rearrange
-    x_ = G.adj.dot(rearrange(x, "T N F -> N (T F)"))
-    x_new = x + c_space * rearrange(x_,  "N (T F) -> T N F", F=x.shape[-1])
-    # x_new[2:] += c_time * (x_new[1:-1] + x_new[:-2])
-    edge_den = G.num_edges / G.num_nodes
-    x_new[1:] += c_time * edge_den * x_new[:-1]
-    return x_new
-
-def test_shuffle_dim(x, mask, **kwargs):
+def test_shuffle_dim(x, mask, test_to_run=az_whiteness_test, pn=None, pt=None, **kwargs):
 
     T, N, F = x.shape
-    pn = np.random.permutation(N)
-    pt = np.random.permutation(T)
+    if pn is None:  pn = np.random.permutation(N)
+    if pt is None:  pt = np.random.permutation(T)
 
+    table = {}
     print("---test 3 -----")
     for lamb in [0.5, 0.0, 1.0]:
 
         # optimality_check(x=x, mask=mask, lamb=0.5, **args)
+        table[lamb] = {}
 
         print(f"--- lambda {lamb} -----")
-        az_res = az_whiteness_test(x=x, mask=mask, lamb=lamb, **kwargs)
+        az_res = test_to_run(x=x, mask=mask, lamb=lamb, **kwargs)
         print(" original", lamb, az_res)
+        table[lamb]["orig"] = az_res
 
-        az_res = az_whiteness_test(x=x[:, pn], mask=mask[:, pn], lamb=lamb, **kwargs)
+        az_res = test_to_run(x=x[:, pn], mask=mask[:, pn], lamb=lamb, **kwargs)
         print("node perm", lamb, az_res)
+        table[lamb]["node"] = az_res
 
-        az_res = az_whiteness_test(x=x[pt], mask=mask[pt], lamb=lamb, **kwargs)
+        az_res = test_to_run(x=x[pt], mask=mask[pt], lamb=lamb, **kwargs)
         print("time perm", lamb, az_res)
+        table[lamb]["time"] = az_res
+
+    row_format = "{:>10}" * (len(table) + 1)
+    res_format = lambda r: f"{r.pvalue:.4f}"
+    print(row_format.format("lamb", "time", "orig", "node"))
+    for l in [0.0, 0.5, 1.0]:
+        res = table[l]
+        print(row_format.format(l,
+                                res_format(res["time"]),
+                                res_format(res["orig"]),
+                                res_format(res["node"])))
+    return table

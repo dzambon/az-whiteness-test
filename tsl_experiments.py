@@ -118,7 +118,8 @@ def add_parser_arguments(parent):
     parser.add_argument('--project-name', type=str, default="sandbox")
     parser.add_argument('--tags', type=str, default=tuple())
 
-    parser.add_argument('--test-checkpoint', type=str, default=None)
+    parser.add_argument('--from-checkpoint', type=str, default=None)
+    parser.add_argument('--resume-training', action='store_true', default=False)
 
     known_args, _ = parser.parse_known_args()
     model_cls = get_model_class(known_args.model_name)
@@ -129,16 +130,19 @@ def add_parser_arguments(parent):
 
 
 def run_experiment(args):
+
     # Set configuration and seed
-    if args.test_checkpoint is not None:
-        checkpoint = os.path.abspath(args.test_checkpoint)
+    _train_model = args.resume_training or (args.from_checkpoint is None)
+    _resume_training = args.resume_training
+    if args.from_checkpoint is not None:
+        checkpoint = os.path.abspath(args.from_checkpoint)
         logging_path = os.path.abspath(os.path.join("/", "/".join(checkpoint.split("/")[:-1])))
         config_file = os.path.abspath(os.path.join(logging_path, "tsl_config.yaml"))
-        result_file = os.path.abspath(os.path.join(logging_path, "results_yhytma.npy"))
+        result_file = os.path.abspath(os.path.join(logging_path, "results_.npy"))
 
         tsl.logger.info(f"Reading config_file: {config_file}")
         stored_args = tsl.Config.from_config_file(config_file)
-        stored_args["test_checkpoint"] = args.test_checkpoint
+        stored_args["from_checkpoint"] = args.from_checkpoint
         stored_args["neptune_logger"] = False
         args = stored_args
         for k, v in args.items():
@@ -157,7 +161,7 @@ def run_experiment(args):
                           args.model_name,
                           exp_name)
 
-    if args.test_checkpoint is None:
+    if _train_model:
         pathlib.Path(logdir).mkdir(parents=True)
 
         from logging import FileHandler
@@ -180,15 +184,14 @@ def run_experiment(args):
     ########################################
 
     # encode time of the day and use it as exogenous variable.
-    if args.dataset_name not in ["gpolyvar", "debug"]:
-        exog_vars = dataset.datetime_encoded('day').values
-        exog_vars = {'global_u': exog_vars}
-
-        adj = dataset.get_connectivity(method='distance', threshold=0.1,
-                                       layout='edge_index')
-    else:
+    if args.dataset_name in ["gpolyvar", "debug"]:
         exog_vars = {}
         adj = dataset.gso
+    else:
+        exog_vars = dataset.datetime_encoded('day').values
+        exog_vars = {'global_u': exog_vars}
+        adj = dataset.get_connectivity(method='distance', threshold=0.1,
+                                       layout='edge_index')
 
     torch_dataset = SpatioTemporalDataset(*dataset.numpy(return_idx=True),
                                           connectivity=adj,
@@ -208,20 +211,10 @@ def run_experiment(args):
     )
     dm.setup()
 
-    if args.test_checkpoint is None:
+    if _train_model:
         ########################################
         # predictor                            #
         ########################################
-
-        additional_model_hparams = dict(n_nodes=torch_dataset.n_nodes,
-                                        input_size=torch_dataset.n_channels,
-                                        output_size=torch_dataset.n_channels,
-                                        horizon=torch_dataset.horizon,
-                                        exog_size=torch_dataset.input_map.u.n_channels if len(exog_vars) else 0)
-
-        model_kwargs = parser_utils.filter_args(args={**vars(args), **additional_model_hparams},
-                                                target_cls=model_cls,
-                                                return_dict=True)
 
         loss_fn = MaskedMAE(compute_on_step=True)
 
@@ -232,21 +225,35 @@ def run_experiment(args):
 
         # setup predictor
         scheduler_class = CosineAnnealingLR if args.use_lr_schedule else None
-        predictor = Predictor(
-            model_class=model_cls,
-            model_kwargs=model_kwargs,
-            optim_class=torch.optim.Adam,
-            optim_kwargs={'lr': args.lr,
-                          'weight_decay': args.l2_reg},
-            loss_fn=loss_fn,
-            metrics=metrics,
-            scheduler_class=scheduler_class,
-            scheduler_kwargs={
-                'eta_min': 0.0001,
-                'T_max': args.epochs
-            },
-        )
+        if _resume_training:
+            tsl.logger.info(f"Loading checkpoint to resume training: {checkpoint}")
+            predictor = Predictor.load_from_checkpoint(checkpoint_path=checkpoint)
+        else:
+            additional_model_hparams = dict(n_nodes=torch_dataset.n_nodes,
+                                            input_size=torch_dataset.n_channels,
+                                            output_size=torch_dataset.n_channels,
+                                            horizon=torch_dataset.horizon,
+                                            exog_size=torch_dataset.input_map.u.n_channels if len(
+                                                exog_vars) else 0)
 
+            model_kwargs = parser_utils.filter_args(
+                args={**vars(args), **additional_model_hparams},
+                target_cls=model_cls,
+                return_dict=True)
+            predictor = Predictor(
+                model_class=model_cls,
+                model_kwargs=model_kwargs,
+                optim_class=torch.optim.Adam,
+                optim_kwargs={'lr': args.lr,
+                              'weight_decay': args.l2_reg},
+                loss_fn=loss_fn,
+                metrics=metrics,
+                scheduler_class=scheduler_class,
+                scheduler_kwargs={
+                    'eta_min': 0.0001,
+                    'T_max': args.epochs
+                },
+            )
 
         ########################################
         # logging options                      #
@@ -266,6 +273,7 @@ def run_experiment(args):
                                       params=vars(args),
                                       offline_mode=False,
                                       upload_stdout=False)
+            logger.log_text(log_name="sys/logdir", text=logdir)
         else:
             logger = TensorBoardLogger(
                 save_dir=logdir,
@@ -290,7 +298,15 @@ def run_experiment(args):
             mode='min',
         )
 
-        trainer = pl.Trainer(max_epochs=args.epochs,
+        if _resume_training:
+            import re
+            done_epochs = re.findall(r"/epoch=(\d+)-step", checkpoint)
+            assert len(done_epochs) == 1
+            done_epochs = int(done_epochs[0])
+        else:
+            done_epochs = 0
+
+        trainer = pl.Trainer(max_epochs=args.epochs - done_epochs,
                              default_root_dir=logdir,
                              logger=logger,
                              gpus=1 if torch.cuda.is_available() else None,
@@ -304,7 +320,7 @@ def run_experiment(args):
     ########################################
     # testing                              #
     ########################################
-    if args.test_checkpoint is not None:
+    if not _train_model:
         tsl.logger.info(f"Reading checkpoint: {checkpoint}")
         predictor = Predictor.load_from_checkpoint(checkpoint_path=checkpoint)
     else:
@@ -329,9 +345,9 @@ def run_experiment(args):
         r_ = ypr - ytr
         r_med_ = masked_median(r_, mask=mask)
         msg = []
-        msg.append(f"original train MAE: {numpy_metrics.masked_mae(ypr, ytr, mask)}")
+        msg.append(f"original model MAE: {numpy_metrics.masked_mae(ypr, ytr, mask)}")
         msg.append(f"corrected model (median={r_med_.mean():.6f})" + \
-                        f" train MAE: {numpy_metrics.masked_mae(ypr - r_med_, ytr, mask)}")
+                   f" MAE: {numpy_metrics.masked_mae(ypr - r_med_, ytr, mask)}")
 
         return ypr, ytr, mask, msg
 
@@ -340,13 +356,16 @@ def run_experiment(args):
     if args.dataset_name == "gpolyvar":
 
         edge_index, edge_weight = dataset.gso
+        import torch_geometric
+        if torch_geometric.__version__ <= "2.0.3":
+            dataset.filter.__explain__ = False
         y_pred, y_true = dataset.filter.predict(dataset.x,
                                                 edge_index=edge_index, edge_weight=edge_weight)
         residuals_optmse = (y_pred - y_true)
 
         mae_score = lambda x: x.abs().mean()
-        tsl.logger.info(f"MAE (theoretical) {mae_score(dataset.sigma_noise * torch.randn(dataset.x.shape))}")
-        tsl.logger.info(f"MAE (baseline)    {mae_score(dataset.x - torch.median(dataset.x))}")
+        tsl.logger.info(f"MAE optimal: analytical {dataset.mae_optimal}, empirical {mae_score(dataset.sigma_noise * torch.randn(dataset.x.shape))}")
+        tsl.logger.info(f"MAE (median baseline)    {mae_score(dataset.x - torch.median(dataset.x))}")
         tsl.logger.info(f"MAE (mse-optimal) {mae_score(residuals_optmse)}")
 
         signal_figure = os.path.abspath("./results/gpolyvar_viz.png")
@@ -363,32 +382,6 @@ def run_experiment(args):
             tsl.logger.info(m)
 
     results = dict()
-    # tsl.logger.info("--------------------------------------")
-    # tsl.logger.info("Predict train loader")
-    # output_train = trainer.predict(predictor, dataloaders=dm.train_dataloader(shuffle=False))
-    # output_train = casting.numpy(output_train)
-    # y_hat, y_true, mask = output_train['y_hat'], \
-    #                       output_train['y'], \
-    #                       output_train['mask']
-    # y_hat, y_true, mask, msg_ = display_mae(y_hat, y_true, mask)
-    # msg_ += optimality_check(x=y_hat - y_true, mask=mask, multivariate=multivariate, **graph)
-    # for m in msg_:
-    #     tsl.logger.info(m)
-    #
-    # tsl.logger.info("--------------------------------------")
-    # tsl.logger.info("Predict validation loader")
-    # output = trainer.predict(predictor, dataloaders=dm.val_dataloader(shuffle=False))
-    # output = casting.numpy(output)
-    # y_hat, y_true, mask = output['y_hat'], \
-    #                       output['y'], \
-    #                       output['mask']
-    # results = dict(val_mae=numpy_metrics.masked_mae(y_hat, y_true, mask),
-    #                val_rmse=numpy_metrics.masked_rmse(y_hat, y_true, mask),
-    #                val_mape=numpy_metrics.masked_mape(y_hat, y_true, mask))
-    # y_hat, y_true, mask, msg_ = display_mae(y_hat, y_true, mask)
-    # msg_ += optimality_check(x=y_hat - y_true, mask=mask, multivariate=multivariate, **graph)
-    # for m in msg_:
-    #     tsl.logger.info(m)
 
     tsl.logger.info("########################################")
     tsl.logger.info("Predict test loader")
@@ -444,10 +437,10 @@ def run_experiment(args):
         tsl.logger.info(m)
 
     tsl.logger.info(" --- debug: shuffle directions --------------------")
-    from graph_sign_test import test3_shuffle_dim
+    from graph_sign_test import test_shuffle_dim
     res_ = res[..., :1]
     mask_ = mask[..., :1]
-    test3_shuffle_dim(x=res_, mask=mask_, multivariate=multivariate, **graph)
+    test_shuffle_dim(x=res_, mask=mask_, multivariate=multivariate, **graph)
 
 
     if args.neptune_logger:

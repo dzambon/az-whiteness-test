@@ -1,6 +1,7 @@
 ################################################
 # Train the models                             #
 ################################################
+# Optionally, set CUDA_VISIBLE_DEVICES and pass --neptune-logger
 
 python tsl_experiments.py --dataset-name la --model-name fcrnn --config fcrnn.yaml
 python tsl_experiments.py --dataset-name la --model-name dcrnn --config dcrnn.yaml

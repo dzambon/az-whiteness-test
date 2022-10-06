@@ -174,6 +174,11 @@ class GraphPolyVARDataset(object):
         self.mask = None
         self.x = None
 
+    @property
+    def mae_optimal(self):
+        """ E[|X|] of a Gaussian X"""
+        return torch.sqrt(torch.tensor(2.0 / 3.14159265359)) * self.sigma_noise
+
     @classmethod
     def load_dataset(cls, path=None):
         import os.path

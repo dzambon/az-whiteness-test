@@ -4,7 +4,7 @@ import seaborn as sb
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from graph_sign_test import az_whiteness_test,  gen_nullmedian_signal, gen_correlated_signal, AVAILABLE_DISTRIBUTIONS
+from graph_sign_test import az_whiteness_test
 from triangular_tricom_graph import TriCommunityGraph
 
 RESULT_FOLDER = "./results"
@@ -25,6 +25,8 @@ def run_multiple_simulations(G, alpha, considered_edge_index,
                              repetitions, disable_warning):
     results = []
     assert len(F_list) == len(T_list)
+    import time
+    elapsed = 0
     for distrib in distrib_list:
         for F, T in zip(F_list, T_list):
             for cs, ct in zip(cs_list, ct_list):
@@ -33,6 +35,7 @@ def run_multiple_simulations(G, alpha, considered_edge_index,
 
                 stats = []
                 alarms = 0
+
                 for r in range(repetitions):
                     if distrib == "norm":
                         subtract_median = False
@@ -43,7 +46,9 @@ def run_multiple_simulations(G, alpha, considered_edge_index,
                     x = gen_correlated_signals_fun(F=F, T=T, G=G,
                                                    corr_spatial=cs, corr_temporal=ct,
                                                    distrib=distrib, subtract_median=subtract_median)
+                    t = time.time()
                     aztest = az_whiteness_test(x=x, edge_index_spatial=considered_edge_index, multivariate=False)
+                    elapsed += time.time() - t
 
                     stats.append(aztest.statistic)
                     if aztest.pvalue < alpha:
@@ -66,6 +71,10 @@ def run_multiple_simulations(G, alpha, considered_edge_index,
                 # scipy.stats.probplot(s, dist="norm", plot=plt)
                 # plt.title(f"F{F} T{T} corr={corr} A{alarm_rate} mu{np.mean(s):.3f}+-{1.0/np.sqrt(repetitions):.3f} std{np.std(s):.3f}")
                 # plt.show()
+
+    runs = len(distrib_list)*len(F_list)*len(ct_list)*repetitions
+    print("Elapsed times: ", elapsed, "for a total of ", runs, "runs")
+    print("Average run time: ", elapsed/runs)
 
     df = pd.DataFrame(results, columns=["F", "T", "corr", "alarm_rate", "distrib"])
     df = df.astype(dict(F=int, T=int, corr=float, alarm_rate=float, distrib=str))
@@ -91,6 +100,7 @@ def plot_results(df, name, subplot_dist=True):
         row_list, row_name = F_list, "F"
 
     cols = col_list.size
+    ax = None
     if subplot_dist:
         rows = row_list.size
         fig, ax = plt.subplots(figsize=(3*cols, 3*rows))
@@ -105,19 +115,22 @@ def plot_results(df, name, subplot_dist=True):
 
         # for i, F in enumerate(F_list):
         for c, col_el in enumerate(col_list):
+            plt.subplot(rows, cols, r * cols + c + 1)
+
             extra_args = dict(annot=True, vmin=0, vmax=1)
             if r < rows-1:
                 extra_args["xticklabels"] = []
             if c > 0:
                 extra_args["yticklabels"] = []
-            if c < cols - 1:
+            if c < cols-1:
                 extra_args["cbar"] = False
 
-            plt.subplot(rows, cols, r * cols + c + 1)
+
             df_ = df.where(df[col_name] == col_el).where(df[row_name] == row_el)
             df_ = df_.dropna().astype(dict(corr=float, T=int))
-            sb.heatmap(df_.pivot("corr", 'T', "alarm_rate"),
-                       **extra_args)
+            hm_ = sb.heatmap(df_.pivot("corr", 'T', "alarm_rate"),
+                             **extra_args)
+            # plt.axis("equal")
 
             if r < rows - 1:
                 plt.xlabel("")
@@ -133,7 +146,14 @@ def plot_results(df, name, subplot_dist=True):
                 distrib = row_el
                 F = col_el
 
-            plt.title(f"{distrib} (F={F})")
+            # plt.rcParams.update({
+            #     "text.usetex": True,
+            #     "font.family": "Helvetica"
+            # })
+            if len(F_list) == 1 and F==1:
+                plt.title(f"{DISTRIBUTIONS[distrib]}")
+            else:
+                plt.title(f"{DISTRIBUTIONS[distrib]} (F={F})")
 
         if not subplot_dist:
             plt.tight_layout()
@@ -155,9 +175,77 @@ def gen_correlated_signals_fun(F, T, G, corr_spatial, corr_temporal, distrib="no
         x -= np.median(x)
     return x
 
+AVAILABLE_DISTRIBUTIONS = ["norm", "chi2(1)", "chi2(5)", "bi-norm", "chi2(1)-chi2(5)", "bi-unif14"]
+def gen_nullmedian_signal(shape: tuple, distrib: str="norm"):
+    """
+    Generates iid graph signals from different distributions
+
+    :param shape: (3-tuple) generally in the format (T, N, F)
+    :param distrib: (str) identifier of the type of distribution
+    :return:
+    """
+    if distrib == "norm":
+        x = np.random.randn(*shape)
+    elif distrib == "chi2(1)":
+        import scipy.stats
+        x = scipy.stats.chi2(df=1).rvs(size=shape)
+        x -= scipy.stats.chi2(df=1).ppf(0.5)
+    elif distrib == "chi2(5)":
+        import scipy.stats
+        x = scipy.stats.chi2(df=5).rvs(size=shape)
+        x -= scipy.stats.chi2(df=5).ppf(0.5)
+    # elif distrib == "mix":
+    #     import scipy.stats
+    #     mask = np.random.rand(*shape) > .7
+    #     x = mask * scipy.stats.chi2(df=1).rvs(size=shape)
+    #     x += (1 - mask) * scipy.stats.chi2(df=5).rvs(size=shape)
+    elif distrib == "bi-norm":
+        import scipy.stats
+        mask = np.random.rand(*shape) > .5
+        x = mask * np.random.randn(*shape)+3.
+        x += (1 - mask) * np.random.randn(*shape)-3.
+    elif distrib == "chi2(1)-chi2(5)":
+        import scipy.stats
+        mask = np.random.rand(*shape) > .5
+        x = mask * scipy.stats.chi2(df=1).rvs(size=shape)
+        x += (1 - mask) * scipy.stats.chi2(df=5).rvs(size=shape) * (-1.)
+    elif distrib == "bi-unif14":
+        import scipy.stats
+        mask = np.random.rand(*shape) > .5
+        x = mask * np.random.rand(*shape)
+        x += (1 - mask) * np.random.rand(*shape) * (-4.)
+    else:
+        raise NotImplementedError(f"Distribution {distrib} is not available")
+
+    return x
+
+def gen_correlated_signal(x, G, c_space, c_time):
+    from einops import rearrange
+    x_ = G.adj.dot(rearrange(x, "T N F -> N (T F)"))
+    x_new = x + c_space * rearrange(x_,  "N (T F) -> T N F", F=x.shape[-1])
+    # x_new[2:] += c_time * (x_new[1:-1] + x_new[:-2])
+    edge_den = G.num_edges / G.num_nodes
+    x_new[1:] += c_time * edge_den * x_new[:-1]
+    return x_new
+
 def to_grid(list1, list2):
     return [l1 for l1 in list1 for _ in list2], \
            [l2 for _ in list1 for l2 in list2]
+
+
+# DISTRIBUTIONS_UNIMODAL = {"norm":           "$\mathcal N(0,1)$",
+#                           "chi2(1)":        "$\chi_2(1)$",
+#                           "chi2(5)":        "$\chi_2(5)$"}
+# DISTRIBUTIONS_MIXTURE = {"bi-norm":         "$\mathcal N(-3,1) + \mathcal N(3,1)",
+#                          "chi2(1)-chi2(5)": "$\chi_2(1)-\chi_2(5)$",
+#                          "bi-unif14":       "$U[-4,0)+U[0,1)"}
+DISTRIBUTIONS_UNIMODAL = {"norm":           "N(0,1)",
+                          "chi2(1)":        "chi2(1)",
+                          "chi2(5)":        "chi2(5)"}
+DISTRIBUTIONS_MIXTURE = {"bi-norm":         "N(-3,1) + N(3,1)",
+                         "chi2(1)-chi2(5)": "chi2(1) - chi2(5)",
+                         "bi-unif14":       "U[-4,0) + U[0,1)"}
+DISTRIBUTIONS = {**DISTRIBUTIONS_UNIMODAL, **DISTRIBUTIONS_MIXTURE}
 
 def main(experiment, show_signal=False, disable_warning=False):
 
@@ -171,7 +259,7 @@ def main(experiment, show_signal=False, disable_warning=False):
         plt.show()
 
     alpha = 0.05
-    rep = 100
+    rep = 1000
     graphs = ["sparse"]
     distrib = ["norm"]
     F_list = [1, 2] #, 4, 8]
@@ -188,9 +276,18 @@ def main(experiment, show_signal=False, disable_warning=False):
         corr_temporal = corr_spatial
         rep = 1
 
-    if experiment == "power":
+    if experiment == "run-time":
+        # rep = 100
+        F_list, T_list = to_grid([1], [10000])
+        corr_spatial = [0.01]
+        corr_temporal = corr_spatial
+
+    if experiment[:5] == "power":
         # Check detection rates for different distributions (regardless of the symmetry)
-        distrib = AVAILABLE_DISTRIBUTIONS
+        if experiment == "power-unimodal":
+            distrib = list(DISTRIBUTIONS_UNIMODAL.keys())
+        elif experiment == "power-mixture":
+            distrib = list(DISTRIBUTIONS_MIXTURE.keys())
         F_list, T_list = to_grid([1], [1, 10, 100, 1000])
         corr_spatial = [0.0, 0.01, 0.04, 0.16]
         corr_temporal = corr_spatial
@@ -271,9 +368,12 @@ def main(experiment, show_signal=False, disable_warning=False):
             G.plot()
 
 if __name__ == "__main__":
-    # v0
+
+    #Figure 3
+    main("power-unimodal", disable_warning=True)
+    main("power-mixture", disable_warning=True)
+    #Figure 5 (Supp. Mat.)
     main("viz")
-    # main("power", disable_warning=True)
-    # main("sparse-full")
-    # main("t-vs-f_time-space")
-    # main("t-vs-f_no-space")
+    #Figure 7 (Supp. Mat.)
+    main("sparse-full")
+
