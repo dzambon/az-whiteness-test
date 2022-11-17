@@ -40,7 +40,7 @@ class Graph(object):
     def plot_static(self, signal=None, node_labels=None,
                     with_node_signal=True, with_edge_sign=True, with_node_labels=False,
                     cmap="RdBu", alpha=None,
-                    savefig=None):
+                    savefig=None, **kwargs):
         """
         Plot the graph using the node positions stored in the graph (self.node_positions).
         Optionally,

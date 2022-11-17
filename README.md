@@ -9,7 +9,7 @@ Daniele Zambon, Cesare Alippi. [AZ-whiteness test: a test for signal uncorrelati
  author = {Zambon, Daniele and Alippi, Cesare},
  booktitle = {Advances in Neural Information Processing Systems},
  title={AZ-whiteness test: a test for signal uncorrelation on spatio-temporal graphs},
- year = {2022}
+ year = {2022},
  url={https://arxiv.org/abs/2204.11135},
 }
 ```

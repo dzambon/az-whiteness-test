@@ -54,11 +54,11 @@ class GraphPolyVARFilter(MessagePassing):
             raise NotImplementedError()
 
         if filter_coefs is not None:
-            self.temporal_order = filter_coefs.shape[1]    # P
-            self.spatial_order = filter_coefs.shape[0]     # L
+            self.temporal_order = filter_coefs.shape[1]     # P
+            self.spatial_order = filter_coefs.shape[0] - 1  # L
             # x: (N, P) . (P, L) -> (N, L)
             self.lin_filter = torch.nn.Linear(in_features=self.temporal_order * self.node_feature_dim,
-                                              out_features=self.spatial_order, bias=False)
+                                              out_features=self.spatial_order + 1, bias=False)
             self.lin_filter.weight.requires_grad = False
             self.lin_filter.weight = torch.nn.Parameter(filter_coefs, requires_grad=False)
 
@@ -66,7 +66,7 @@ class GraphPolyVARFilter(MessagePassing):
             self.temporal_order = temporal_order
             self.spatial_order = spatial_order
             self.lin_filter = torch.nn.Linear(in_features=self.temporal_order * self.node_feature_dim,
-                                              out_features=self.spatial_order, bias=False)
+                                              out_features=self.spatial_order + 1, bias=False)
 
         assert self.temporal_order is not None
         assert self.spatial_order is not None
